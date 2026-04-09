@@ -6,13 +6,18 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # =============================================
 #   SOZLAMALAR
 # =============================================
-BOT_TOKEN    = "8397197387:AAEVpZgpakEwLKHnSa9NHk1IYSSsH7wgAeo"
-ADMIN_ID     = 397162553
-CHANNEL_ID   = "@tarjima_kinolar_uzbek123"
-CHANNEL_LINK = "https://t.me/tarjima_kinolar_uzbek123"
-CHANNEL_LINK1 = "https://t.me/+--3JIi79uoY2NjZi"
-CHANNEL_LINK2 = "https://t.me/+_f1z1kMvZ6gzNWVi"
-DB_FILE      = "movies.json"
+BOT_TOKEN      = "8397197387:AAEVpZgpakEwLKHnSa9NHk1IYSSsH7wgAeo"
+ADMIN_ID       = 397162553
+CHANNEL_ID     = "@tarjima_kinolar_uzbek123"   # Obuna tekshiriladigan kanal
+CHANNEL_LINK   = "https://t.me/tarjima_kinolar_uzbek123"
+CHANNEL_LINK1  = "https://t.me/+--3JIi79uoY2NjZi"
+CHANNEL_LINK2  = "https://t.me/+_f1z1kMvZ6gzNWVi"
+
+# Kinolar saqlanadigan kanal (bot shu kanalda admin bo'lishi kerak)
+# Obuna kanalingiz bilan bir xil bo'lishi mumkin
+STORAGE_CHANNEL = "@tarjima_kinolar_uzbek123"
+
+DB_FILE = "movies.json"
 # =============================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -32,7 +37,6 @@ def save_movies(data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def record_view(code: str, user_id: int):
-    """Kino ko'rilganda statistika yangilanadi."""
     movies = load_movies()
     if code not in movies:
         return
@@ -58,19 +62,31 @@ def is_subscribed(uid: int) -> bool:
         print(f"[XATO] obuna: {e}")
         return False
 
+def extract_code(text: str) -> str | None:
+    """Kanal postidan kino kodini ajratib oladi.
+    Caption 'Kod: 2009' yoki shunchaki '2009' bo'lishi mumkin."""
+    if not text:
+        return None
+    text = text.strip()
+    # "Kod: 2009" formatini qo'llab-quvvatlaydi
+    if text.lower().startswith("kod:"):
+        return text.split(":", 1)[1].strip()
+    # Faqat raqam yoki qisqa kod
+    if len(text.split()) == 1:
+        return text
+    return None
+
 
 # ─── Klaviaturalar ────────────────────────────────────────────────────────────
 
 def admin_panel_kb() -> InlineKeyboardMarkup:
-    """Admin uchun asosiy panel tugmalari."""
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("➕ Kino qo'shish",  callback_data="adm_add"),
-        InlineKeyboardButton("📋 Ro'yxat",         callback_data="adm_list"),
+        InlineKeyboardButton("📋 Ro'yxat",   callback_data="adm_list"),
+        InlineKeyboardButton("🗑 O'chirish",  callback_data="adm_delete"),
     )
     kb.add(
-        InlineKeyboardButton("🗑 O'chirish",        callback_data="adm_delete"),
-        InlineKeyboardButton("📊 Statistika",       callback_data="adm_stats"),
+        InlineKeyboardButton("📊 Statistika", callback_data="adm_stats"),
     )
     return kb
 
@@ -93,6 +109,62 @@ def back_kb() -> InlineKeyboardMarkup:
     return kb
 
 
+# ─── Kanal postlarini kuzatish — kinolarni avtomatik saqlash ─────────────────
+
+@bot.channel_post_handler(content_types=["video", "document"])
+def on_channel_post(message):
+    """Admin kanalga video yuborsa, caption dagi kodni avtomatik saqlaydi."""
+    # Faqat bizning storage kanaldan
+    chat_username = getattr(message.chat, "username", "")
+    if f"@{chat_username}" != STORAGE_CHANNEL and str(message.chat.id) != STORAGE_CHANNEL:
+        return
+
+    caption = message.caption or ""
+    code = extract_code(caption)
+    if not code:
+        # Caption yo'q yoki kod topilmadi — adminni ogohlantir
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                f"⚠️ Kanalga video yuborildi, lekin kod topilmadi.\n\n"
+                f"Caption ni quyidagicha yozing:\n"
+                f"<code>Kod: 2009</code>  yoki  <code>2009</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    movies = load_movies()
+    if code in movies:
+        # Eski yozuvni yangilash (message_id o'zgarishi mumkin)
+        movies[code]["message_id"] = message.message_id
+        movies[code]["chat_id"]    = message.chat.id
+        movies[code].setdefault("views", 0)
+        movies[code].setdefault("viewers", [])
+    else:
+        movies[code] = {
+            "message_id": message.message_id,
+            "chat_id":    message.chat.id,
+            "views":      0,
+            "viewers":    [],
+        }
+    save_movies(movies)
+
+    # Adminga xabar
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            f"✅ <b>Yangi kino saqlandi!</b>\n\n"
+            f"📌 Kod: <code>{code}</code>\n"
+            f"📨 Xabar ID: <code>{message.message_id}</code>",
+            parse_mode="HTML",
+            reply_markup=admin_panel_kb(),
+        )
+    except Exception:
+        pass
+
+
 # ─── /start ──────────────────────────────────────────────────────────────────
 
 @bot.message_handler(commands=["start"])
@@ -103,7 +175,10 @@ def start(message):
         bot.send_message(
             uid,
             "👑 <b>Admin paneliga xush kelibsiz!</b>\n\n"
-            "Quyidagi tugmalardan foydalaning:",
+            "📌 <b>Kino qo'shish:</b>\n"
+            "Kanalga video yuboring, caption ga kino kodini yozing:\n"
+            "<code>Kod: 2009</code>  yoki  <code>2009</code>\n\n"
+            "Bot avtomatik saqlab oladi ✅",
             parse_mode="HTML",
             reply_markup=admin_panel_kb(),
         )
@@ -135,7 +210,6 @@ def handle_callbacks(call):
     uid  = call.from_user.id
     data = call.data
 
-    # ── Foydalanuvchi: obuna tekshirish
     if data == "check_sub":
         if is_subscribed(uid):
             bot.edit_message_text(
@@ -149,12 +223,10 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "❌ Hali obuna bo'lmagansiz!", show_alert=True)
         return
 
-    # ── Faqat admin uchun
     if not is_admin(uid):
         bot.answer_callback_query(call.id, "⛔ Ruxsat yo'q.", show_alert=True)
         return
 
-    # ── Admin: bosh panel
     if data == "adm_home":
         bot.edit_message_text(
             "👑 <b>Admin paneli</b>\n\nQuyidagi tugmalardan foydalaning:",
@@ -164,18 +236,6 @@ def handle_callbacks(call):
             reply_markup=admin_panel_kb(),
         )
 
-    # ── Admin: kino qo'shish
-    elif data == "adm_add":
-        admin_state[uid] = {"step": "wait_video"}
-        bot.edit_message_text(
-            "🎬 <b>1-qadam:</b> Kino faylini yuboring.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            parse_mode="HTML",
-            reply_markup=cancel_kb(),
-        )
-
-    # ── Admin: ro'yxat
     elif data == "adm_list":
         movies = load_movies()
         if not movies:
@@ -185,7 +245,8 @@ def handle_callbacks(call):
         for code, info in movies.items():
             views   = info.get("views", 0)
             viewers = len(info.get("viewers", []))
-            text += f"🎬 Kod: <code>{code}</code>  |  👁 {views} marta  |  👤 {viewers} kishi\n"
+            src     = "📡 Kanal" if "message_id" in info else "📁 Fayl"
+            text += f"🎬 <code>{code}</code>  {src}  |  👁 {views}  |  👤 {viewers}\n"
         bot.edit_message_text(
             text,
             chat_id=call.message.chat.id,
@@ -194,7 +255,6 @@ def handle_callbacks(call):
             reply_markup=back_kb(),
         )
 
-    # ── Admin: o'chirish
     elif data == "adm_delete":
         movies = load_movies()
         if not movies:
@@ -212,7 +272,6 @@ def handle_callbacks(call):
             reply_markup=kb,
         )
 
-    # ── Admin: statistika — kinolar ro'yxati
     elif data == "adm_stats":
         movies = load_movies()
         if not movies:
@@ -230,7 +289,6 @@ def handle_callbacks(call):
             reply_markup=kb,
         )
 
-    # ── Admin: bitta kino statistikasi
     elif data.startswith("stat_"):
         code   = data[5:]
         movies = load_movies()
@@ -252,7 +310,6 @@ def handle_callbacks(call):
             reply_markup=kb,
         )
 
-    # ── Admin: kino o'chirishni tasdiqlash
     elif data.startswith("del_"):
         code   = data[4:]
         movies = load_movies()
@@ -271,7 +328,6 @@ def handle_callbacks(call):
         else:
             bot.answer_callback_query(call.id, "Kino topilmadi.", show_alert=True)
 
-    # ── Bekor qilish
     elif data == "cancel_add":
         admin_state.pop(uid, None)
         bot.edit_message_text(
@@ -282,68 +338,14 @@ def handle_callbacks(call):
         )
 
 
-# ─── Video qabul qilish ───────────────────────────────────────────────────────
-
-@bot.message_handler(content_types=["video", "document"])
-def handle_video(message):
-    uid = message.from_user.id
-    if not is_admin(uid):
-        return
-    state = admin_state.get(uid, {})
-    if state.get("step") != "wait_video":
-        return
-
-    file_id = message.video.file_id if message.video else message.document.file_id
-    admin_state[uid] = {"step": "wait_code", "file_id": file_id}
-    bot.send_message(
-        uid,
-        "✅ Kino qabul qilindi!\n\n"
-        "🔢 <b>2-qadam:</b> Endi bu kinoning <b>kodini</b> yuboring.\n"
-        "Masalan: <code>001</code>",
-        parse_mode="HTML",
-        reply_markup=cancel_kb(),
-    )
-
-
-# ─── Matn xabarlari ───────────────────────────────────────────────────────────
+# ─── Matn xabarlari — foydalanuvchi kino kodi yozsa ─────────────────────────
 
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
     uid  = message.from_user.id
     text = message.text.strip()
 
-    # ── Admin: kod kutilmoqda
     if is_admin(uid):
-        state = admin_state.get(uid, {})
-        if state.get("step") == "wait_code":
-            code   = text
-            movies = load_movies()
-            if code in movies:
-                bot.send_message(
-                    uid,
-                    f"⚠️ <b>{code}</b> kodi allaqachon mavjud.\n"
-                    "Boshqa kod kiriting.",
-                    parse_mode="HTML",
-                    reply_markup=cancel_kb(),
-                )
-                return
-            movies[code] = {
-                "file_id": state["file_id"],
-                "views":   0,
-                "viewers": [],
-            }
-            save_movies(movies)
-            admin_state.pop(uid, None)
-            bot.send_message(
-                uid,
-                f"🎉 <b>Kino muvaffaqiyatli saqlandi!</b>\n\n"
-                f"📌 Kod: <code>{code}</code>",
-                parse_mode="HTML",
-                reply_markup=admin_panel_kb(),
-            )
-            return
-
-        # Admin boshqa matn — panelni qayta ko'rsat
         bot.send_message(
             uid,
             "👑 <b>Admin paneli</b>",
@@ -352,14 +354,13 @@ def handle_text(message):
         )
         return
 
-    # ── Foydalanuvchi: obuna tekshiruvi
     if not is_subscribed(uid):
         bot.send_message(uid, "⚠️ Kino olish uchun avval kanalga obuna bo'ling!", reply_markup=sub_kb())
         return
 
-    # ── Foydalanuvchi: kino kodi
     movies = load_movies()
     movie  = movies.get(text)
+
     if not movie:
         bot.send_message(
             uid,
@@ -369,15 +370,30 @@ def handle_text(message):
         return
 
     wait = bot.send_message(uid, "⏳ Kino yuklanmoqda...")
+
     try:
         bot.delete_message(uid, wait.message_id)
-        bot.send_video(
-            uid,
-            video=movie["file_id"],
-            caption=f"🎬 Kino kodi: <b>{text}</b>",
-            parse_mode="HTML",
-        )
+
+        # Kanal orqali saqlangan kinoni forward qilish
+        if "message_id" in movie:
+            bot.copy_message(
+                chat_id=uid,
+                from_chat_id=movie["chat_id"],
+                message_id=movie["message_id"],
+                caption=f"🎬 Kino kodi: <b>{text}</b>",
+                parse_mode="HTML",
+            )
+        # Eski file_id orqali saqlangan kinolar (orqaga moslik)
+        elif "file_id" in movie:
+            bot.send_video(
+                uid,
+                video=movie["file_id"],
+                caption=f"🎬 Kino kodi: <b>{text}</b>",
+                parse_mode="HTML",
+            )
+
         record_view(text, uid)
+
     except Exception as e:
         print(f"[XATO] video yuborish: {e}")
         bot.send_message(uid, "❌ Xatolik yuz berdi. Keyinroq urinib ko'ring.")
